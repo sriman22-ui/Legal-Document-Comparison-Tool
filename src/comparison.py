@@ -31,6 +31,10 @@ SYSTEM_PROMPT = (
 _MAX_ATTEMPTS = 3
 _BACKOFF_BASE_SECONDS = 1.0
 
+# Per-request timeout (seconds). Free models can be slow or hang; fail fast and
+# fall back rather than blocking the whole run on one stuck clause.
+_REQUEST_TIMEOUT_SECONDS = 45.0
+
 
 def get_client() -> Any:
     """Build an OpenAI-compatible client from env vars (works with any provider)."""
@@ -39,6 +43,7 @@ def get_client() -> Any:
     return OpenAI(
         api_key=os.environ["LLM_API_KEY"],
         base_url=os.environ["LLM_BASE_URL"],
+        timeout=_REQUEST_TIMEOUT_SECONDS,
     )
 
 

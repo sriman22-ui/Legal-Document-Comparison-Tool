@@ -10,9 +10,11 @@ Compare cannot make.
 
 A six-stage pipeline:
 
-1. **Upload** two documents (template vs. revised). Accepts `.pdf` and `.txt`.
+1. **Upload** two documents (template vs. revised). Accepts `.pdf`, `.txt`, and image
+   files (`.png`, `.jpg`/`.jpeg`, `.bmp`, `.tif`/`.tiff`, `.webp`).
 2. **Parse & OCR** — detects digital vs scanned PDFs *before* doing any OCR. Digital
    PDFs use native text extraction; only genuinely scanned/image PDFs are OCR'd.
+   Image uploads are always OCR'd directly.
 3. **Segment** each document into clauses using numbered/named/all-caps headings.
 4. **Align** clauses between the two documents by heading similarity (renumbered
    clauses still match; missing ones are flagged).
@@ -79,6 +81,14 @@ same NDA with exactly these deliberate edits:
   *deleted / high*.
 - **No License** reworded with the same meaning (a control) → *reworded_same_meaning /
   none*.
+
+### Scanned-image samples (to try OCR)
+
+`data/sample_service_template.png` and `data/sample_service_revised.png` are a 3-clause
+Master Service Agreement rendered as **images** (no selectable text), so uploading them
+exercises the OCR path. The revised version changes clause 1 (payment window 30→60 days,
+interest removed) and clause 2 (term 5→2 years) in *meaning*, and merely rewords clause 3
+(Governing Law) — a quick way to see the risk report on OCR'd input.
 
 ## Running the tests
 

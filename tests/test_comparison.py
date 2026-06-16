@@ -12,7 +12,12 @@ import pytest
 
 from src.alignment import align
 from src.comparison import compare_clause, verdict_for_unmatched
-from src.parsing import MIN_CHARS_PER_PAGE, classify_pdf_source, extract_text
+from src.parsing import (
+    MIN_CHARS_PER_PAGE,
+    _clean_pdf_markdown,
+    classify_pdf_source,
+    extract_text,
+)
 from src.schema import Clause
 from src.segmentation import segment
 
@@ -68,6 +73,58 @@ def test_revised_segmentation_has_seven_clauses():
     assert len(segment(revised_text)) == 7
 
 
+def test_segmentation_recognises_clause_headings():
+    # "Clause N. TITLE" headings (common in leases, and what scanned/OCR'd
+    # contracts often use) must segment just like Section/Article headings.
+    text = (
+        "Clause 1. ASSIGNMENT.\n"
+        "Tenant shall not assign this Lease without consent.\n\n"
+        "Clause 2. LATE CHARGES.\n"
+        "A late charge of five percent applies after ten days.\n\n"
+        "Clause 3. GOVERNING LAW.\n"
+        "Governed by the laws of the State of New York."
+    )
+    clauses = segment(text)
+    assert [c.heading for c in clauses] == [
+        "ASSIGNMENT",
+        "LATE CHARGES",
+        "GOVERNING LAW",
+    ]
+
+
+def test_segmentation_tolerates_ocr_damaged_headings():
+    # Real OCR of a scanned lease: "Clause" read as "ClauSe"/"CIause" (capital i for
+    # the L), missing spaces, and a "OLD VERSION" title + "FINAL DRAFT" watermark.
+    # All three clauses must still be found; the furniture must be ignored.
+    ocr = (
+        "OLD VERSION\n"
+        "ClauSe1. ASSIGNMENT.\n"
+        "Tenant shall not assign this Lease.\n"
+        "ClauSe2.LATE CHARGES.\n"
+        "A late charge applies after ten days.\n"
+        "CIause 3. GOVERNING LAW.\n"
+        "Governed by the laws of New York.\n"
+        "FINAL DRAFT 2024\n"
+    )
+    clauses = segment(ocr)
+    assert [c.heading for c in clauses] == ["ASSIGNMENT", "LATE CHARGES", "GOVERNING LAW"]
+
+
+def test_markdown_pdf_text_segments_after_cleaning():
+    # pymupdf4llm returns Markdown for digital PDFs, so headings arrive wrapped in
+    # '##'/'**'. Flattening must restore them so segmentation isn't blocked (and a
+    # trailing all-caps watermark must NOT become a spurious clause).
+    md = (
+        "## **LEASE AGREEMENT**\n\n"
+        "## **Clause 1. ASSIGNMENT.**\n\n"
+        "Tenant shall not assign this Lease.\n\n"
+        "**Clause 2. LATE CHARGES.** A late charge applies after ten days.\n\n"
+        "FINAL DRAFT 2024\n"
+    )
+    clauses = segment(_clean_pdf_markdown(md))
+    assert [c.heading for c in clauses] == ["ASSIGNMENT", "LATE CHARGES"]
+
+
 # ----------------------------------------------------------------- alignment
 
 
@@ -89,6 +146,26 @@ def test_alignment_flags_the_deleted_injunctive_relief_clause():
 
     # No spurious additions for this edit set.
     assert not any(p.is_added for p in pairs)
+
+
+def test_alignment_matches_renamed_clauses():
+    # A clause whose heading was expanded or reworded must still align (not show up
+    # as a deletion + an addition).
+    template = [
+        Clause(id="1", heading="Assignment", text="Tenant shall not assign this Lease."),
+        Clause(id="2", heading="Late Charges", text="A late charge of five percent applies."),
+    ]
+    revised = [
+        Clause(id="1", heading="Assignment and Subletting", text="Tenant shall not assign or sublet."),
+        Clause(id="2", heading="Late Payment Fees", text="A late charge of ten percent applies."),
+    ]
+    pairs = align(template, revised)
+    matched = {
+        (p.template.heading, p.revised.heading) for p in pairs if p.template and p.revised
+    }
+    assert ("Assignment", "Assignment and Subletting") in matched
+    assert ("Late Charges", "Late Payment Fees") in matched
+    assert not any(p.is_deleted or p.is_added for p in pairs)
 
 
 def test_verdict_for_deleted_clause_is_high_risk():

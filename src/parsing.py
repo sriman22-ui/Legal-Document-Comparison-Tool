@@ -15,6 +15,7 @@ without them installed.
 from __future__ import annotations
 
 import os
+import re
 from typing import Literal, Tuple
 
 # Average non-whitespace characters per page above which a PDF is treated as a
@@ -22,7 +23,39 @@ from typing import Literal, Tuple
 # document is treated as SCANNED and routed through OCR. Tunable in one place.
 MIN_CHARS_PER_PAGE = 100
 
-SourceType = Literal["digital", "scanned", "text"]
+SourceType = Literal["digital", "scanned", "text", "image"]
+
+# Raster image formats are always OCR'd directly (no digital text to detect).
+IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp"}
+
+# pymupdf4llm returns Markdown; these strip it back to plain text (see
+# _clean_pdf_markdown) so heading detection isn't blocked by '#'/'**' prefixes.
+_MD_HEADING = re.compile(r"^\s{0,3}#{1,6}\s*")
+_MD_BLOCKQUOTE = re.compile(r"^\s{0,3}>\s?")
+_MD_EMPHASIS = re.compile(r"\*\*|__|\*|_")
+
+
+def _clean_pdf_markdown(md: str) -> str:
+    """Flatten pymupdf4llm Markdown to plain text.
+
+    pymupdf4llm extracts digital PDFs as Markdown, so a heading arrives as
+    ``## **Clause 1. ASSIGNMENT.**``. Segmentation keys off the *start* of each
+    line, so the leading ``#``/``**`` would hide every heading (only a stray
+    all-caps watermark would slip through the fallback). We strip heading markers,
+    emphasis, ``<br>`` soft breaks, and the library's image-placeholder
+    scaffolding so a digital PDF segments just like a plain ``.txt`` file.
+    """
+    md = md.replace("<br>", "\n")
+    lines = []
+    for raw in md.splitlines():
+        if "intentionally omitted" in raw or "picture text" in raw:
+            continue  # pymupdf4llm image placeholder scaffolding
+        line = _MD_HEADING.sub("", raw)
+        line = _MD_BLOCKQUOTE.sub("", line)
+        line = _MD_EMPHASIS.sub("", line)
+        lines.append(line.rstrip())
+    text = "\n".join(lines)
+    return re.sub(r"\n{3,}", "\n\n", text).strip()
 
 
 def _count_non_whitespace(text: str) -> int:
@@ -45,8 +78,9 @@ def extract_text(path: str) -> Tuple[str, SourceType]:
     """Extract raw text from a .txt or .pdf file.
 
     Returns (text, source_type) where source_type is one of
-    "text" (a .txt file), "digital" (a PDF with selectable text), or
-    "scanned" (an image PDF that required OCR).
+    "text" (a .txt file), "digital" (a PDF with selectable text),
+    "scanned" (an image PDF that required OCR), or "image" (a raster image
+    such as .png/.jpg that was OCR'd directly).
     """
     ext = os.path.splitext(path)[1].lower()
 
@@ -57,7 +91,13 @@ def extract_text(path: str) -> Tuple[str, SourceType]:
     if ext == ".pdf":
         return _extract_pdf(path)
 
-    raise ValueError(f"Unsupported file type '{ext}'. Only .txt and .pdf are supported.")
+    if ext in IMAGE_EXTS:
+        return _ocr_image(path), "image"
+
+    raise ValueError(
+        f"Unsupported file type '{ext}'. Supported: .txt, .pdf, and images "
+        f"({', '.join(sorted(IMAGE_EXTS))})."
+    )
 
 
 def _extract_pdf(path: str) -> Tuple[str, SourceType]:
@@ -65,7 +105,7 @@ def _extract_pdf(path: str) -> Tuple[str, SourceType]:
     import fitz  # PyMuPDF, pulled in by pymupdf4llm
     import pymupdf4llm
 
-    extracted = pymupdf4llm.to_markdown(path)
+    extracted = _clean_pdf_markdown(pymupdf4llm.to_markdown(path))
 
     doc = fitz.open(path)
     num_pages = doc.page_count
@@ -77,6 +117,17 @@ def _extract_pdf(path: str) -> Tuple[str, SourceType]:
 
     # Near-empty selectable text -> almost certainly a scanned/image PDF.
     return _ocr_pdf(path), "scanned"
+
+
+def _ocr_rows_to_text(result) -> str:
+    """Join RapidOCR rows into text, one detected line per row.
+
+    Each result row is [box, text, confidence]; preserving one row per line keeps
+    clause headings on their own line so segmentation can find them.
+    """
+    if not result:
+        return ""
+    return "\n".join(row[1] for row in result)
 
 
 def _ocr_pdf(path: str) -> str:
@@ -92,10 +143,19 @@ def _ocr_pdf(path: str) -> str:
             pix = page.get_pixmap(dpi=200)
             png_bytes = pix.tobytes("png")
             result, _elapsed = ocr(png_bytes)
-            if result:
-                # Each result row is [box, text, confidence].
-                page_texts.append("\n".join(row[1] for row in result))
+            text = _ocr_rows_to_text(result)
+            if text:
+                page_texts.append(text)
     finally:
         doc.close()
 
     return "\n\n".join(page_texts)
+
+
+def _ocr_image(path: str) -> str:
+    """OCR a raster image file (.png/.jpg/...) directly with rapidocr-onnxruntime."""
+    from rapidocr_onnxruntime import RapidOCR
+
+    ocr = RapidOCR()
+    result, _elapsed = ocr(path)
+    return _ocr_rows_to_text(result)

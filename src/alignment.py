@@ -18,11 +18,16 @@ from typing import List, Optional
 
 from .schema import Clause
 
-# Minimum normalized-heading similarity for two clauses to be considered the same.
-HEADING_MATCH_THRESHOLD = 0.6
+# Minimum heading similarity for two clauses to be considered the same. Renamed
+# clauses (e.g. "Late Charges" -> "Late Payment Fees") only partly overlap, so the
+# bar is moderate; the greedy best-match still picks the strongest pair per row.
+HEADING_MATCH_THRESHOLD = 0.5
 
 # Small bonus when the clause numbers happen to match too.
 _ID_MATCH_BONUS = 0.05
+
+# Dropped before token-overlap scoring so filler words don't fake a match.
+_STOPWORDS = {"and", "or", "the", "of", "to", "a", "an", "in", "for"}
 
 
 @dataclass
@@ -52,9 +57,30 @@ def _similarity(a: str, b: str) -> float:
     return SequenceMatcher(None, a, b).ratio()
 
 
+def _content_tokens(heading: str) -> set[str]:
+    return {w for w in _normalize(heading).split() if w not in _STOPWORDS}
+
+
+def _containment(a: str, b: str) -> float:
+    """Fraction of the shorter heading's content words shared with the longer.
+
+    1.0 when one heading's words are a subset of the other's, so an expanded
+    heading ("Assignment" -> "Assignment and Subletting") still scores as a match
+    even though character-level similarity is dragged down by the extra words.
+    """
+    ta, tb = _content_tokens(a), _content_tokens(b)
+    if not ta or not tb:
+        return 0.0
+    return len(ta & tb) / min(len(ta), len(tb))
+
+
+def _heading_similarity(a: str, b: str) -> float:
+    return max(_similarity(_normalize(a), _normalize(b)), _containment(a, b))
+
+
 def _score(template: Clause, revised: Clause) -> float:
-    base = _similarity(_normalize(template.heading), _normalize(revised.heading))
-    bonus = _ID_MATCH_BONUS if template.id == revised.id else 0.0
+    base = _heading_similarity(template.heading, revised.heading)
+    bonus = _ID_MATCH_BONUS if template.id.lower() == revised.id.lower() else 0.0
     return min(base + bonus, 1.0)
 
 

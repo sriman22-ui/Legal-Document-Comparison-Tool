@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import os
 import tempfile
+import time
 from pathlib import Path
 from typing import List, Optional
 
@@ -25,7 +26,9 @@ from src.parsing import extract_text
 from src.schema import ClauseVerdict
 from src.segmentation import segment
 
-load_dotenv()
+# override=True so editing .env (e.g. switching LLM_MODEL) takes effect on the
+# next rerun — without it, python-dotenv keeps the value first loaded this process.
+load_dotenv(override=True)
 
 DATA_DIR = Path(__file__).parent / "data"
 SAMPLE_TEMPLATE = DATA_DIR / "sample_template.txt"
@@ -49,11 +52,60 @@ SOURCE_LABEL = {
     "text": "plain text",
     "digital": "digital PDF — OCR skipped",
     "scanned": "scanned PDF — OCR applied",
+    "image": "image — OCR applied",
 }
+
+UPLOAD_TYPES = ["pdf", "txt", "png", "jpg", "jpeg", "bmp", "tif", "tiff", "webp"]
 
 
 def llm_configured() -> bool:
     return bool(os.environ.get("LLM_API_KEY") and os.environ.get("LLM_BASE_URL"))
+
+
+# ------------------------------------------------------ processing animation
+
+# Abstract morphing shapes: three blobs that bend/expand/rotate and blend, plus a
+# slowly spinning dashed ring. Rendered ONCE into its own placeholder so the CSS
+# animation runs continuously; only the percentage text below it is re-rendered.
+_PROCESSING_SHAPES = """
+<style>
+.ldc-stage{display:flex;justify-content:center;align-items:center;height:168px;margin:6px 0 2px;}
+.ldc-orbit{position:relative;width:148px;height:148px;}
+.ldc-ring{position:absolute;inset:-12px;border:2px dashed rgba(150,168,200,.40);
+  border-radius:46% 54% 52% 48%/48% 46% 54% 52%;animation:ldc-spin 7s linear infinite;}
+.ldc-blob{position:absolute;inset:0;margin:auto;width:98px;height:98px;mix-blend-mode:screen;
+  opacity:.88;animation:ldc-morph 3.4s ease-in-out infinite;}
+.ldc-b1{background:#5b8def;}
+.ldc-b2{background:#c8821a;animation-duration:4.2s;animation-delay:-1.3s;}
+.ldc-b3{background:#3a9d57;animation-duration:5.0s;animation-delay:-2.4s;}
+@keyframes ldc-morph{
+  0%,100%{border-radius:42% 58% 70% 30%/45% 45% 55% 55%;transform:rotate(0deg) scale(1) translate(0,0);}
+  25%{border-radius:70% 30% 46% 54%/30% 60% 40% 70%;transform:rotate(90deg) scale(1.14) translate(7px,-5px);}
+  50%{border-radius:34% 66% 56% 44%/64% 44% 56% 36%;transform:rotate(180deg) scale(.90) translate(-6px,6px);}
+  75%{border-radius:58% 42% 38% 62%/52% 56% 44% 48%;transform:rotate(270deg) scale(1.08) translate(5px,7px);}
+}
+@keyframes ldc-spin{to{transform:rotate(360deg);}}
+.ldc-pct{text-align:center;font-size:2.5rem;font-weight:800;letter-spacing:.5px;line-height:1.1;
+  background:linear-gradient(90deg,#5b8def,#3a9d57);-webkit-background-clip:text;
+  background-clip:text;color:transparent;}
+.ldc-sub{text-align:center;color:#9aa7b8;font-size:.9rem;margin-top:-2px;}
+</style>
+<div class="ldc-stage"><div class="ldc-orbit">
+  <div class="ldc-ring"></div>
+  <div class="ldc-blob ldc-b1"></div>
+  <div class="ldc-blob ldc-b2"></div>
+  <div class="ldc-blob ldc-b3"></div>
+</div></div>
+"""
+
+
+def _render_percent(placeholder, frac: float, i: int, total: int) -> None:
+    pct = int(round(frac * 100))
+    placeholder.markdown(
+        f"<div class='ldc-pct'>{pct}%</div>"
+        f"<div class='ldc-sub'>Comparing clauses… ({i}/{total})</div>",
+        unsafe_allow_html=True,
+    )
 
 
 # --------------------------------------------------------------------------- IO
@@ -87,15 +139,26 @@ def _verdict_cache() -> dict:
     return st.session_state.verdict_cache
 
 
-def run_comparison(pairs: List[AlignedPair], use_llm: bool) -> List[ClauseVerdict]:
-    """Produce a verdict per pair, caching aligned-pair verdicts across reruns."""
+def run_comparison(
+    pairs: List[AlignedPair],
+    use_llm: bool,
+    anim_ph,
+    pct_ph,
+) -> List[ClauseVerdict]:
+    """Produce a verdict per pair, caching aligned-pair verdicts across reruns.
+
+    Drives the morphing-shapes animation: ``anim_ph`` holds the shapes (rendered
+    once so the CSS keeps running) and ``pct_ph`` shows the live percentage.
+    """
     cache = _verdict_cache()
     client = get_client() if use_llm else None
     model = get_model() if use_llm else ""
 
     verdicts: List[ClauseVerdict] = []
-    progress = st.progress(0.0, text="Comparing clauses…")
     total = len(pairs)
+
+    anim_ph.markdown(_PROCESSING_SHAPES, unsafe_allow_html=True)
+    _render_percent(pct_ph, 0.0, 0, total)
 
     for i, pair in enumerate(pairs, start=1):
         if pair.template is None or pair.revised is None:
@@ -109,11 +172,15 @@ def run_comparison(pairs: List[AlignedPair], use_llm: bool) -> List[ClauseVerdic
                     verdict = compare_clause(client, model, pair)
                 else:
                     verdict = heuristic_verdict(pair)
+                    # The offline heuristic is near-instant; pace it slightly so
+                    # the processing animation is actually perceptible.
+                    time.sleep(0.35)
                 cache[key] = verdict
                 verdicts.append(verdict)
-        progress.progress(i / total, text=f"Comparing clauses… ({i}/{total})")
+        _render_percent(pct_ph, i / total, i, total)
 
-    progress.empty()
+    anim_ph.empty()
+    pct_ph.empty()
     return verdicts
 
 
@@ -185,7 +252,9 @@ def _process(template_text: str, revised_text: str) -> None:
         f"{len(revised_clauses)} revised clauses."
     )
     pairs = align(template_clauses, revised_clauses)
-    verdicts = run_comparison(pairs, use_llm=llm_configured())
+    anim_ph = st.empty()
+    pct_ph = st.empty()
+    verdicts = run_comparison(pairs, llm_configured(), anim_ph, pct_ph)
     render_report(verdicts)
 
 
@@ -204,17 +273,31 @@ def main() -> None:
         )
 
     col_a, col_b = st.columns(2)
-    template_upload = col_a.file_uploader("Template (original)", type=["pdf", "txt"])
-    revised_upload = col_b.file_uploader("Revised contract", type=["pdf", "txt"])
+    template_upload = col_a.file_uploader("Template (original)", type=UPLOAD_TYPES)
+    revised_upload = col_b.file_uploader("Revised contract", type=UPLOAD_TYPES)
 
-    run_clicked = st.button("Compare", type="primary")
-    sample_clicked = st.button("Load sample contracts")
+    # Centre the action buttons (width-independent), and keep them in a placeholder
+    # we can clear so they disappear the moment a comparison starts.
+    st.markdown(
+        "<style>"
+        "div[data-testid='stElementContainer']:has(>.stButton){width:100% !important;}"
+        ".stButton{display:flex;justify-content:center;width:100%;}"
+        ".stButton>button{min-width:260px;max-width:420px;}"
+        "</style>",
+        unsafe_allow_html=True,
+    )
+    controls_ph = st.empty()
+    with controls_ph.container():
+        run_clicked = st.button("Compare", type="primary")
+        sample_clicked = st.button("Load sample contracts")
 
     if sample_clicked:
+        controls_ph.empty()
         (t_text, t_src), (r_text, r_src) = _load_sample()
         st.info(
-            f"Loaded sample NDA. Template detected as **{SOURCE_LABEL[t_src]}**; "
-            f"revised detected as **{SOURCE_LABEL[r_src]}**."
+            f"Loaded sample NDA.  \n"
+            f"Template detected as **{SOURCE_LABEL[t_src]}**.  \n"
+            f"Revised detected as **{SOURCE_LABEL[r_src]}**."
         )
         _process(t_text, r_text)
         return
@@ -223,11 +306,12 @@ def main() -> None:
         if not template_upload or not revised_upload:
             st.error("Please upload both a template and a revised document, or load the sample.")
             return
+        controls_ph.empty()
         t_text, t_src = _read_upload(template_upload)
         r_text, r_src = _read_upload(revised_upload)
         st.info(
-            f"Template detected as **{SOURCE_LABEL[t_src]}**; "
-            f"revised detected as **{SOURCE_LABEL[r_src]}**."
+            f"Template detected as **{SOURCE_LABEL[t_src]}**.  \n"
+            f"Revised detected as **{SOURCE_LABEL[r_src]}**."
         )
         _process(t_text, r_text)
 

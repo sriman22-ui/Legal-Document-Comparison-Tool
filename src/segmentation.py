@@ -2,7 +2,7 @@
 
 We recognise three kinds of headings:
   * numbered:  "1.", "1.1", "2)"  (the common case)
-  * named:     "Section 4", "ARTICLE V"
+  * named:     "Section 4", "ARTICLE V", "Clause 1. ASSIGNMENT"
   * all-caps:  a short ALL CAPS line acting as a heading
 
 Numbered and named headings are tried first. All-caps detection is only used as a
@@ -19,13 +19,26 @@ from .schema import Clause
 # "1." / "1.1" / "2)"  followed by a capitalised heading word.
 _NUMBERED: Pattern[str] = re.compile(r"^(\d+(?:\.\d+)*)[.)]?\s+([A-Z].*)$")
 
-# "Section 4", "ARTICLE V", "Article 12:" ...
+# "Section 4", "ARTICLE V", "Article 12:", "Clause 1. ASSIGNMENT", "CLAUSE 2" ...
+# Tolerant of OCR damage: case-insensitive, flexible separator, and the classic
+# l<->I<->1<->| glyph confusion in the keyword (so "ClauSe1.", "CIause 3" — capital i
+# for the L — and "C1ause 2" are all still recognised as clause headings).
 _NAMED: Pattern[str] = re.compile(
-    r"^((?:Section|Article|SECTION|ARTICLE)\s+[0-9IVXLCDM]+)[.:)]?\s*(.*)$"
+    r"^((?:se[ci]tion|artic[li1|]e|c[li1|]ause)\s*[0-9ivxlcdm]+)[.:)\-]?\s*(.*)$",
+    re.IGNORECASE,
 )
 
 # A short ALL-CAPS line, e.g. "CONFIDENTIALITY". Used only as a fallback.
 _ALLCAPS: Pattern[str] = re.compile(r"^([A-Z][A-Z0-9 ,'&/\-]{3,60})$")
+
+# Document furniture (titles, watermarks, stamps) that OCR picks up but that must
+# NOT be treated as clause headings — otherwise "OLD VERSION" or "FINAL DRAFT 2024"
+# become spurious clauses.
+_NON_CLAUSE_MARKERS: Pattern[str] = re.compile(
+    r"\b(version|draft|final|revised|original|confidential|copy|sample|specimen"
+    r"|page|exhibit|annex|appendix)\b",
+    re.IGNORECASE,
+)
 
 
 def _match_heading(line: str, patterns: List[Pattern[str]]) -> Optional[Tuple[str, str]]:
@@ -49,7 +62,9 @@ def _match_heading(line: str, patterns: List[Pattern[str]]) -> Optional[Tuple[st
             tail = m.group(2).strip()
             heading = tail.split(".")[0].strip() if tail else label
             return label, heading
-        # _ALLCAPS
+        # _ALLCAPS — skip document furniture (titles / watermarks / stamps).
+        if _NON_CLAUSE_MARKERS.search(s):
+            return None
         return s, s.title()
     return None
 
