@@ -1,0 +1,12 @@
+streamlit>=1.30
+pymupdf4llm>=0.0.17
+openai>=1.0
+pydantic>=2.0
+python-dotenv>=1.0
+pandas>=2.0
+pytest>=8.0
+
+# OCR fallback — only needed for SCANNED/image PDFs (imported lazily, so the app
+# and the digital-PDF/.txt paths run fine without it). The newest releases cap at
+# Python <3.13, so we pin to a line that has wheels for 3.11–3.13.
+rapidocr-onnxruntime>=1.2.0
