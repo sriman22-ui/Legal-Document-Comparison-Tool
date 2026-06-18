@@ -1,4 +1,4 @@
-# ⚖️ Legal Document Comparison Tool
+#  Legal Document Comparison Tool
 
 Compare two versions of a contract and produce a **risk-aware change report** — not
 just a text diff. For each clause the tool classifies the change by **meaning** and by
