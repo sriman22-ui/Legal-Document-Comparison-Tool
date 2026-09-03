@@ -11,7 +11,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from src.alignment import align
-from src.comparison import compare_clause, verdict_for_unmatched
+from src.comparison import _safe_error_summary, compare_clause, verdict_for_unmatched
 from src.parsing import (
     MIN_CHARS_PER_PAGE,
     _clean_pdf_markdown,
@@ -225,6 +225,46 @@ def test_compare_clause_strips_json_fences():
 
     verdict = compare_clause(client, "mock-model", pair)
     assert verdict.change_type == "unchanged"
+
+
+def test_fail_safe_explanation_never_leaks_the_provider_payload():
+    # A real 429 from Groq embeds the organization id and a billing URL. The report
+    # may be served publicly, so the fail-safe text must classify the error, not
+    # echo it. Regression test for that leak.
+    class RateLimitError(Exception):
+        status_code = 429
+
+    secret = (
+        "Rate limit reached for model `openai/gpt-oss-120b` in organization "
+        "`org_01m07qqtq4eh0rze9qjb51qrez` service tier `on_demand` ... Upgrade at "
+        "https://console.groq.com/settings/billing"
+    )
+
+    template = Clause(id="7", heading="Governing Law", text="New York.")
+    revised = Clause(id="7", heading="Governing Law", text="New York.")
+    pair = align([template], [revised])[0]
+
+    client = MagicMock()
+    client.chat.completions.create.side_effect = RateLimitError(secret)
+
+    verdict = compare_clause(client, "mock-model", pair, max_attempts=1)
+
+    assert verdict.change_type == "meaning_changed"
+    assert verdict.risk_level == "medium"
+    assert "manual review" in verdict.explanation
+    assert "rate or quota limit" in verdict.explanation
+    # None of the sensitive fragments may reach the rendered explanation.
+    for leaked in ("org_01m07", "console.groq.com", "on_demand", secret):
+        assert leaked not in verdict.explanation
+
+
+def test_safe_error_summary_classifies_without_echoing():
+    assert "malformed JSON" in _safe_error_summary(
+        json.JSONDecodeError("Expecting value", "not json", 0)
+    )
+    assert "timed out" in _safe_error_summary(TimeoutError("connect timeout to 1.2.3.4"))
+    assert "1.2.3.4" not in _safe_error_summary(TimeoutError("connect timeout to 1.2.3.4"))
+    assert "no response" in _safe_error_summary(None)
 
 
 def test_compare_clause_fails_safe_on_bad_json():

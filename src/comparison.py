@@ -11,14 +11,19 @@ test suite, which mocks the client — imports without the SDK installed.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import time
 from difflib import SequenceMatcher
 from typing import Any, Optional
 
+from pydantic import ValidationError
+
 from .alignment import AlignedPair
 from .schema import Clause, ClauseVerdict
+
+logger = logging.getLogger(__name__)
 
 SYSTEM_PROMPT = (
     "You are a contracts analyst. You compare a clause from an original template "
@@ -81,6 +86,33 @@ def _backoff_seconds(attempt: int) -> float:
     return _BACKOFF_BASE_SECONDS * (2 ** attempt)
 
 
+def _safe_error_summary(exc: Optional[BaseException]) -> str:
+    """Describe a failed call without echoing the provider's raw error payload.
+
+    The fail-safe verdict is rendered in the report, which may be served on a
+    public URL, and provider errors routinely embed account/organization ids,
+    billing links and sometimes the echoed request. So classify the failure and
+    return only that; the full exception goes to the log instead.
+    """
+    if exc is None:
+        return "no response was received"
+
+    name = type(exc).__name__
+    status = getattr(exc, "status_code", None)
+
+    if status == 429 or "RateLimit" in name:
+        return "the provider's rate or quota limit was reached (HTTP 429)"
+    if isinstance(exc, json.JSONDecodeError):
+        return "the model returned malformed JSON"
+    if isinstance(exc, (KeyError, ValidationError)):
+        return "the model's JSON was missing or had an invalid field"
+    if "Timeout" in name:
+        return "the request timed out"
+    if isinstance(status, int):
+        return f"the provider returned HTTP {status}"
+    return f"the request failed ({name})"
+
+
 def compare_clause(
     client: Any,
     model: str,
@@ -118,6 +150,11 @@ def compare_clause(
             )
         except Exception as exc:  # noqa: BLE001 — free providers raise many error types
             last_error = exc
+            # Full detail goes to the log, which is private to the operator.
+            logger.warning(
+                "clause %s: comparison attempt %d/%d failed: %s",
+                template.id, attempt + 1, max_attempts, exc,
+            )
             if attempt < max_attempts - 1:
                 time.sleep(_backoff_seconds(attempt))
 
@@ -128,8 +165,9 @@ def compare_clause(
         change_type="meaning_changed",
         risk_level="medium",
         explanation=(
-            "Automated comparison could not parse a valid response after retries "
-            f"({last_error}); this clause is flagged for manual review."
+            "Automated comparison did not return a usable verdict after retries — "
+            f"{_safe_error_summary(last_error)}. This clause is flagged for manual "
+            "review; see the server log for the full error."
         ),
         template_text=template.text,
         revised_text=revised.text,

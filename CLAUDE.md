@@ -101,6 +101,12 @@ and no authentication on the deployed app by design.
   restarted to pick up changes made *before* first launch. Without all three
   `LLM_` vars set, the app silently falls back to the offline heuristic
   (`llm_configured()` in `app.py` gates this).
+- **Provider errors are never echoed into the report.** The fail-safe verdict runs the
+  exception through `_safe_error_summary` (`src/comparison.py`), which classifies it
+  (429 / malformed JSON / timeout / HTTP status) and returns nothing from the payload;
+  the raw exception is logged instead. A real Groq 429 carries the organization id and
+  a billing URL, and the deployed app is public and unauthenticated. Pinned by
+  `test_fail_safe_explanation_never_leaks_the_provider_payload`.
 - **The live LLM API is never called in tests.** `tests/test_comparison.py` mocks the
   OpenAI client entirely (`MagicMock`) — `compare_clause` is unit-tested against
   canned JSON responses, including malformed ones to exercise the fail-safe path.

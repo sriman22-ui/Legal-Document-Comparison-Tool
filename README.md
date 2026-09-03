@@ -180,6 +180,9 @@ Notes:
 - **Fail safe, never crash.** The LLM call retries with exponential backoff (free
   providers rate-limit). If the response still can't be parsed, the clause is returned
   as `meaning_changed / medium` flagged for manual review rather than crashing the run.
+  The clause text says only *what kind* of failure occurred (`_safe_error_summary`) —
+  provider errors embed organization ids and billing links, and the report may be
+  served on a public URL. The full exception goes to the server log instead.
 - **Typed structured output.** Responses are validated into a pydantic `ClauseVerdict`;
   an invalid `change_type`/`risk_level` triggers a retry.
 - **Caching.** Verdicts are cached in `st.session_state` keyed by
