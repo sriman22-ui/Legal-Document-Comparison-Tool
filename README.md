@@ -1,3 +1,13 @@
+---
+title: Legal Document Comparison Tool
+emoji: ⚖️
+colorFrom: yellow
+colorTo: red
+sdk: streamlit
+app_file: app.py
+pinned: false
+---
+
 #  Legal Document Comparison Tool
 
 Compare two versions of a contract and produce a **risk-aware change report** — not
@@ -99,6 +109,24 @@ pytest
 Tests cover `.txt` parsing, the digital-vs-scanned threshold, segmentation into the
 right number of clauses, alignment correctly flagging the deleted clause, and the
 comparison call (with a **mocked** LLM client — the live API is never called).
+
+## Deploying to Hugging Face Spaces (free)
+
+The YAML header at the top of this file *is* the Space config — Spaces reads
+`sdk: streamlit` and `app_file: app.py` from it, installs `requirements.txt`, and
+serves the app. Nothing else in the repo needs to change.
+
+1. Create a Space at [huggingface.co/new-space](https://huggingface.co/new-space),
+   choosing **Streamlit** as the SDK and the free **CPU basic** hardware.
+2. Push this repo to the Space's git remote (or link the GitHub repo).
+3. Set `LLM_API_KEY`, `LLM_BASE_URL` and `LLM_MODEL` under **Settings → Variables and
+   secrets**, as *secrets* (not variables). The app reads them from the environment,
+   so no `.env` is needed on the Space.
+
+Free CPU basic has enough RAM for the OCR path, which is the memory-hungry part:
+OCR'ing a single page peaks around **770MB** (onnxruntime model buffers plus the
+rendered bitmap), against ~120MB for the `.txt`/digital-PDF path. That peak is why
+a 512MB instance is not viable — see the Render notes below.
 
 ## Deploying to Render
 

@@ -70,7 +70,15 @@ port 8501) for previewing the app.
 
 ## Deployment
 
-Deployed to Render as a native Python web service, defined by `render.yaml`
+Two targets are configured; they don't conflict.
+
+**Hugging Face Spaces (free tier).** The YAML front-matter at the top of `README.md`
+is the Space config (`sdk: streamlit`, `app_file: app.py`) — it must stay the first
+thing in that file or the Space won't build. `sdk_version` is deliberately omitted so
+HF picks a supported Streamlit rather than failing on the pinned `1.58.0`. Secrets are
+set in the Space UI, not a `.env`.
+
+**Render.** Defined by `render.yaml`
 (Blueprint). The start command binds to Render's injected `$PORT`; headless mode,
 XSRF, and a 30MB `maxUploadSize` cap come from `.streamlit/config.toml`. The three
 `LLM_` env vars are `sync: false` in `render.yaml` and must be set in the Render
