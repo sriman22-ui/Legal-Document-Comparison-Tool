@@ -100,6 +100,36 @@ Tests cover `.txt` parsing, the digital-vs-scanned threshold, segmentation into 
 right number of clauses, alignment correctly flagging the deleted clause, and the
 comparison call (with a **mocked** LLM client — the live API is never called).
 
+## Deploying to Render
+
+`render.yaml` defines the service, so you can create it from the Render dashboard via
+**New → Blueprint** and point it at this repo. It sets:
+
+- **Build command:** `pip install -r requirements.txt`
+- **Start command:** `streamlit run app.py --server.port=$PORT --server.address=0.0.0.0`
+  (Render injects `$PORT`; headless mode and the upload limit come from
+  `.streamlit/config.toml`)
+- **Plan:** `starter` — the free tier's 512MB RAM is not enough once the OCR models
+  load. If you only ever feed it `.txt`/digital PDFs you can try free, but the OCR
+  path will likely OOM.
+
+Then set the three `LLM_` variables in the Render dashboard (they are marked
+`sync: false` in `render.yaml`, so Render prompts for them rather than reading values
+from the repo). **Never commit real keys** — `.env` is gitignored; `.env.example` is
+the template.
+
+Notes:
+
+- Free/low tiers spin down when idle, so the first request after a quiet period is
+  slow (cold start plus OCR model load). That's expected, not a bug.
+- Uploads are capped at 30MB via `.streamlit/config.toml` (Streamlit's default is
+  200MB). Each aligned clause pair costs one LLM call, so a large document fans out
+  into many calls — the cap keeps that bounded.
+- The deployed URL has **no authentication**: anyone with the link can upload
+  documents and spend your API quota, and clause text is sent to whichever provider
+  `LLM_BASE_URL` points at. Keep that in mind before sharing the URL or uploading real
+  contracts.
+
 ## Key design decisions
 
 - **Detect before OCR.** PDFs are first extracted natively with `pymupdf4llm`. We only
@@ -132,6 +162,8 @@ flags without disturbing the default heading-based path.
 ```
 legal-doc-compare/
   app.py                 # Streamlit UI
+  render.yaml            # Render service definition (Blueprint)
+  .streamlit/config.toml # server settings: headless, upload cap, XSRF
   src/
     parsing.py           # PDF/OCR/txt -> raw text + detected source type
     segmentation.py      # text -> List[Clause]

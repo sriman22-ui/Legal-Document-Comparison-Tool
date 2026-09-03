@@ -57,6 +57,56 @@ SOURCE_LABEL = {
 
 UPLOAD_TYPES = ["pdf", "txt", "png", "jpg", "jpeg", "bmp", "tif", "tiff", "webp"]
 
+# ------------------------------------------------------------------ page style
+
+# Warm amber gradient wash: soft blurred colour concentrated at the top of the
+# page, fading to near-white further down so the report stays legible. Layered
+# radial gradients (rather than an image) keep it resolution-independent and add
+# nothing to page weight. Streamlit's own header/toolbar is made transparent so
+# the gradient runs edge to edge behind it.
+_PAGE_STYLE = """
+<style>
+.stApp{
+  background:
+    radial-gradient(58% 46% at 8% 10%,  rgba(245,168,38,.62) 0%, rgba(245,168,38,0) 60%),
+    radial-gradient(50% 40% at 92% 2%,  rgba(242,104,60,.40) 0%, rgba(242,104,60,0) 64%),
+    radial-gradient(95% 60% at 50% -10%,rgba(255,206,128,.66) 0%, rgba(255,206,128,0) 72%),
+    linear-gradient(180deg,#FFF6E8 0%,#FFFCF6 42%,#FFFDF9 100%);
+  background-attachment: fixed;
+}
+[data-testid="stHeader"]{background:transparent;}
+
+/* Status banners: keep the semantic colour as a left accent bar, but drop the
+   saturated full-width tint, which fights the warm wash. The tint sits on the
+   inner stAlertContainer, not on stAlert itself. */
+[data-testid="stAlertContainer"]{
+  background:rgba(255,255,255,.86) !important;
+  border-radius:10px;
+  border-left:4px solid #9aa7b8;
+  box-shadow:0 4px 16px rgba(190,120,50,.07);
+  color:#1F2328;
+}
+[data-testid="stAlertContainer"]:has([data-testid="stAlertContentSuccess"]){border-left-color:#3a7d44;}
+[data-testid="stAlertContainer"]:has([data-testid="stAlertContentInfo"]){border-left-color:#F2A03C;}
+[data-testid="stAlertContainer"]:has([data-testid="stAlertContentWarning"]){border-left-color:#E08A1E;}
+[data-testid="stAlertContainer"]:has([data-testid="stAlertContentError"]){border-left-color:#b00020;}
+
+/* Cards (uploaders, expanders, table) sit on white so they read as raised
+   surfaces against the wash, matching the reference layout. */
+[data-testid="stFileUploader"] section,
+[data-testid="stExpander"] details{
+  background:#fff;
+  border:1px solid rgba(226,168,100,.30);
+  border-radius:12px;
+  box-shadow:0 6px 22px rgba(190,120,50,.07);
+}
+[data-testid="stExpander"] details{overflow:hidden;}
+
+/* Metric row: the big coral numbers from the reference. */
+[data-testid="stMetricValue"]{color:#EF5A28;font-weight:800;}
+</style>
+"""
+
 
 def llm_configured() -> bool:
     return bool(os.environ.get("LLM_API_KEY") and os.environ.get("LLM_BASE_URL"))
@@ -71,13 +121,16 @@ _PROCESSING_SHAPES = """
 <style>
 .ldc-stage{display:flex;justify-content:center;align-items:center;height:168px;margin:6px 0 2px;}
 .ldc-orbit{position:relative;width:148px;height:148px;}
-.ldc-ring{position:absolute;inset:-12px;border:2px dashed rgba(150,168,200,.40);
+.ldc-ring{position:absolute;inset:-12px;border:2px dashed rgba(226,150,60,.45);
   border-radius:46% 54% 52% 48%/48% 46% 54% 52%;animation:ldc-spin 7s linear infinite;}
-.ldc-blob{position:absolute;inset:0;margin:auto;width:98px;height:98px;mix-blend-mode:screen;
-  opacity:.88;animation:ldc-morph 3.4s ease-in-out infinite;}
-.ldc-b1{background:#5b8def;}
-.ldc-b2{background:#c8821a;animation-duration:4.2s;animation-delay:-1.3s;}
-.ldc-b3{background:#3a9d57;animation-duration:5.0s;animation-delay:-2.4s;}
+/* multiply, not screen: screen blends toward WHITE, so on this light amber page
+   the blobs washed out to invisible. multiply darkens instead, so they read as
+   deeper pools of the background gradient's own colours. */
+.ldc-blob{position:absolute;inset:0;margin:auto;width:98px;height:98px;mix-blend-mode:multiply;
+  opacity:.72;animation:ldc-morph 3.4s ease-in-out infinite;}
+.ldc-b1{background:#F5A826;}
+.ldc-b2{background:#F2683C;animation-duration:4.2s;animation-delay:-1.3s;}
+.ldc-b3{background:#FFCE80;animation-duration:5.0s;animation-delay:-2.4s;}
 @keyframes ldc-morph{
   0%,100%{border-radius:42% 58% 70% 30%/45% 45% 55% 55%;transform:rotate(0deg) scale(1) translate(0,0);}
   25%{border-radius:70% 30% 46% 54%/30% 60% 40% 70%;transform:rotate(90deg) scale(1.14) translate(7px,-5px);}
@@ -86,9 +139,9 @@ _PROCESSING_SHAPES = """
 }
 @keyframes ldc-spin{to{transform:rotate(360deg);}}
 .ldc-pct{text-align:center;font-size:2.5rem;font-weight:800;letter-spacing:.5px;line-height:1.1;
-  background:linear-gradient(90deg,#5b8def,#3a9d57);-webkit-background-clip:text;
+  background:linear-gradient(90deg,#F5A826,#EF5A28);-webkit-background-clip:text;
   background-clip:text;color:transparent;}
-.ldc-sub{text-align:center;color:#9aa7b8;font-size:.9rem;margin-top:-2px;}
+.ldc-sub{text-align:center;color:#9a8778;font-size:.9rem;margin-top:-2px;}
 </style>
 <div class="ldc-stage"><div class="ldc-orbit">
   <div class="ldc-ring"></div>
@@ -260,6 +313,7 @@ def _process(template_text: str, revised_text: str) -> None:
 
 def main() -> None:
     st.set_page_config(page_title="Legal Document Comparison Tool", layout="wide")
+    st.markdown(_PAGE_STYLE, unsafe_allow_html=True)
     st.title("⚖️ Legal Document Comparison Tool")
 
     configured = llm_configured()
