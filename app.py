@@ -30,6 +30,30 @@ from src.segmentation import segment
 # next rerun — without it, python-dotenv keeps the value first loaded this process.
 load_dotenv(override=True)
 
+
+def _secrets_into_env() -> None:
+    """Mirror Streamlit secrets into os.environ.
+
+    Streamlit Community Cloud has no `.env` — secrets are entered in the app
+    settings and surface via ``st.secrets``. ``src/comparison.py`` deliberately
+    reads plain environment variables so it stays UI-agnostic and testable, so
+    bridge the two here. Existing env vars win, keeping local `.env` authoritative.
+
+    Accessing ``st.secrets`` raises when no secrets file exists (the normal local
+    case), hence the broad guard.
+    """
+    for key in ("LLM_API_KEY", "LLM_BASE_URL", "LLM_MODEL"):
+        if os.environ.get(key):
+            continue
+        try:
+            if key in st.secrets:
+                os.environ[key] = str(st.secrets[key])
+        except Exception:  # noqa: BLE001 — no secrets configured is not an error
+            return
+
+
+_secrets_into_env()
+
 DATA_DIR = Path(__file__).parent / "data"
 SAMPLE_TEMPLATE = DATA_DIR / "sample_template.txt"
 SAMPLE_REVISED = DATA_DIR / "sample_revised.txt"

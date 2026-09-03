@@ -72,11 +72,17 @@ port 8501) for previewing the app.
 
 Two targets are configured; they don't conflict.
 
-**Hugging Face Spaces (free tier).** The YAML front-matter at the top of `README.md`
-is the Space config (`sdk: streamlit`, `app_file: app.py`) — it must stay the first
-thing in that file or the Space won't build. `sdk_version` is deliberately omitted so
-HF picks a supported Streamlit rather than failing on the pinned `1.58.0`. Secrets are
-set in the Space UI, not a `.env`.
+**Streamlit Community Cloud (free, the primary target).** Reads `requirements.txt` and
+`.streamlit/config.toml` as-is; set the Python version to 3.12 in Advanced settings.
+Secrets are entered as TOML in the app settings, not a `.env`, and reach the app via
+`st.secrets` — `_secrets_into_env()` in `app.py` mirrors them into `os.environ` so
+`src/comparison.py` can keep reading plain env vars and stay Streamlit-free. The ~1GB
+ceiling fits the ~770MB single-page OCR peak but not comfortably; a multi-page scanned
+PDF is the realistic OOM.
+
+Hugging Face Spaces is **not** an option: its SDK choices are Gradio, Docker (paid)
+and Static — no Streamlit. A Gradio port was written and reverted (see commits
+`1c0a575` and `67597ce`) if that tradeoff is ever revisited.
 
 **Render.** Defined by `render.yaml`
 (Blueprint). The start command binds to Render's injected `$PORT`; headless mode,

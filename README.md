@@ -1,13 +1,3 @@
----
-title: Legal Document Comparison Tool
-emoji: ⚖️
-colorFrom: yellow
-colorTo: red
-sdk: streamlit
-app_file: app.py
-pinned: false
----
-
 #  Legal Document Comparison Tool
 
 Compare two versions of a contract and produce a **risk-aware change report** — not
@@ -110,23 +100,40 @@ Tests cover `.txt` parsing, the digital-vs-scanned threshold, segmentation into 
 right number of clauses, alignment correctly flagging the deleted clause, and the
 comparison call (with a **mocked** LLM client — the live API is never called).
 
-## Deploying to Hugging Face Spaces (free)
+## Deploying to Streamlit Community Cloud (free)
 
-The YAML header at the top of this file *is* the Space config — Spaces reads
-`sdk: streamlit` and `app_file: app.py` from it, installs `requirements.txt`, and
-serves the app. Nothing else in the repo needs to change.
+Nothing in the repo needs to change — Community Cloud reads `requirements.txt` and
+`.streamlit/config.toml` directly.
 
-1. Create a Space at [huggingface.co/new-space](https://huggingface.co/new-space),
-   choosing **Streamlit** as the SDK and the free **CPU basic** hardware.
-2. Push this repo to the Space's git remote (or link the GitHub repo).
-3. Set `LLM_API_KEY`, `LLM_BASE_URL` and `LLM_MODEL` under **Settings → Variables and
-   secrets**, as *secrets* (not variables). The app reads them from the environment,
-   so no `.env` is needed on the Space.
+1. At [share.streamlit.io](https://share.streamlit.io), create an app from this repo,
+   with `app.py` as the entrypoint and `main` as the branch.
+2. Under **Advanced settings**, set the Python version to **3.12** (the pins in
+   `requirements.txt` were resolved against 3.12).
+3. Still in **Advanced settings**, paste the secrets in TOML form:
 
-Free CPU basic has enough RAM for the OCR path, which is the memory-hungry part:
-OCR'ing a single page peaks around **770MB** (onnxruntime model buffers plus the
-rendered bitmap), against ~120MB for the `.txt`/digital-PDF path. That peak is why
-a 512MB instance is not viable — see the Render notes below.
+   ```toml
+   LLM_API_KEY = "your-key"
+   LLM_BASE_URL = "https://..."
+   LLM_MODEL = "your-model"
+   ```
+
+   `_secrets_into_env()` in `app.py` copies these into `os.environ`, which is where
+   `src/comparison.py` looks — that module stays free of any Streamlit import so it
+   remains testable on its own.
+
+### Memory: the one thing to watch
+
+Community Cloud allows roughly **1GB** per app. Measured peaks for this app:
+
+| Path | Peak RSS |
+|---|---|
+| `.txt` / digital PDF | ~120–180MB |
+| OCR of one scanned page | **~770MB** |
+
+So OCR fits, but without much margin — the peak is `onnxruntime`'s model buffers plus
+the 200 DPI page bitmap in `_ocr_pdf`. A **multi-page** scanned PDF is the realistic
+way to blow the limit. If that happens the app restarts and you'll see it in the logs;
+the fix is either fewer pages per upload or a paid host (see Render below).
 
 ## Deploying to Render
 

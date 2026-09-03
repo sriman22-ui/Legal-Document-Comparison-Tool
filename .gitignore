@@ -1,5 +1,7 @@
 # Secrets — never commit real keys
 .env
+# Local equivalent of the Streamlit Community Cloud secrets UI
+.streamlit/secrets.toml
 
 # Virtual environment
 .venv/
