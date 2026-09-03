@@ -3,7 +3,7 @@ title: Legal Document Comparison Tool
 emoji: ⚖️
 colorFrom: yellow
 colorTo: red
-sdk: gradio
+sdk: streamlit
 app_file: app.py
 pinned: false
 ---
@@ -44,12 +44,12 @@ source .venv/bin/activate
 
 pip install -r requirements.txt
 cp .env.example .env          # then fill in the three LLM_ values
-python app.py                 # serves on http://localhost:7860
+streamlit run app.py
 ```
 
 > **⚠️ Before running real comparisons, you must set all three `LLM_` values in `.env`:**
 > `LLM_API_KEY`, `LLM_BASE_URL`, and `LLM_MODEL`. The app reads these on startup, so
-> open `.env` and fill them in *before* you launch (`python app.py`). If any of
+> open `.env` and fill them in *before* you launch (`streamlit run app.py`). If any of
 > the three is blank, the app falls back to the offline heuristic and will **not** call
 > the LLM. See [Choosing a free provider](#choosing-a-free-provider) for the exact
 > values to paste in. If you change `.env` while the app is already running, restart it.
@@ -113,11 +113,11 @@ comparison call (with a **mocked** LLM client — the live API is never called).
 ## Deploying to Hugging Face Spaces (free)
 
 The YAML header at the top of this file *is* the Space config — Spaces reads
-`sdk: gradio` and `app_file: app.py` from it, installs `requirements.txt`, and
+`sdk: streamlit` and `app_file: app.py` from it, installs `requirements.txt`, and
 serves the app. Nothing else in the repo needs to change.
 
 1. Create a Space at [huggingface.co/new-space](https://huggingface.co/new-space),
-   choosing **Gradio** as the SDK and the free **CPU basic** hardware.
+   choosing **Streamlit** as the SDK and the free **CPU basic** hardware.
 2. Push this repo to the Space's git remote (or link the GitHub repo).
 3. Set `LLM_API_KEY`, `LLM_BASE_URL` and `LLM_MODEL` under **Settings → Variables and
    secrets**, as *secrets* (not variables). The app reads them from the environment,
@@ -134,8 +134,9 @@ a 512MB instance is not viable — see the Render notes below.
 **New → Blueprint** and point it at this repo. It sets:
 
 - **Build command:** `pip install -r requirements.txt`
-- **Start command:** `python app.py` (the app binds `0.0.0.0` and reads `$PORT`,
-  which Render injects; it falls back to 7860 locally)
+- **Start command:** `streamlit run app.py --server.port=$PORT --server.address=0.0.0.0`
+  (Render injects `$PORT`; headless mode and the upload limit come from
+  `.streamlit/config.toml`)
 - **Plan:** `starter` — the free tier's 512MB RAM is not enough once the OCR models
   load. If you only ever feed it `.txt`/digital PDFs you can try free, but the OCR
   path will likely OOM.
@@ -149,9 +150,9 @@ Notes:
 
 - Free/low tiers spin down when idle, so the first request after a quiet period is
   slow (cold start plus OCR model load). That's expected, not a bug.
-- Uploads are capped at 30MB (`MAX_UPLOAD_MB` in `app.py`). Each aligned clause pair
-  costs one LLM call, so a large document fans out into many calls — the cap keeps
-  that bounded.
+- Uploads are capped at 30MB via `.streamlit/config.toml` (Streamlit's default is
+  200MB). Each aligned clause pair costs one LLM call, so a large document fans out
+  into many calls — the cap keeps that bounded.
 - The deployed URL has **no authentication**: anyone with the link can upload
   documents and spend your API quota, and clause text is sent to whichever provider
   `LLM_BASE_URL` points at. Keep that in mind before sharing the URL or uploading real
@@ -175,9 +176,7 @@ Notes:
 - **Typed structured output.** Responses are validated into a pydantic `ClauseVerdict`;
   an invalid `change_type`/`risk_level` triggers a retry.
 - **Caching.** Verdicts are cached in `st.session_state` keyed by
-  `(template_text, revised_text)` in a per-session `gr.State`, so re-running a
-  comparison doesn't re-call the API. Per-session, not global, so one user's clause
-  text is never served from another user's cache.
+  `(template_text, revised_text)` so Streamlit reruns don't re-call the API.
 
 ## Stretch goals
 
@@ -190,8 +189,9 @@ flags without disturbing the default heading-based path.
 
 ```
 legal-doc-compare/
-  app.py                 # Gradio UI
+  app.py                 # Streamlit UI
   render.yaml            # Render service definition (Blueprint)
+  .streamlit/config.toml # server settings: headless, upload cap, XSRF
   src/
     parsing.py           # PDF/OCR/txt -> raw text + detected source type
     segmentation.py      # text -> List[Clause]

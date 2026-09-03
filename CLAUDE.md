@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-A Gradio app that compares two versions of a contract and produces a risk-aware
+A Streamlit app that compares two versions of a contract and produces a risk-aware
 change report per clause (not a plain text diff). Six-stage pipeline, each stage its
 own module in `src/`:
 
@@ -56,7 +56,7 @@ pip install -r requirements.txt
 cp .env.example .env            # fill in LLM_API_KEY, LLM_BASE_URL, LLM_MODEL
 
 # run the app
-python app.py                   # serves on 7860, or $PORT if set
+streamlit run app.py
 
 # run all tests
 pytest
@@ -66,24 +66,21 @@ pytest tests/test_comparison.py::test_alignment_flags_the_deleted_injunctive_rel
 ```
 
 There's a Claude Code launch config at `.claude/launch.json` (`legal-doc-compare`,
-port 7860) for previewing the app.
+port 8501) for previewing the app.
 
 ## Deployment
 
 Two targets are configured; they don't conflict.
 
 **Hugging Face Spaces (free tier).** The YAML front-matter at the top of `README.md`
-is the Space config (`sdk: gradio`, `app_file: app.py`) — it must stay the first thing
-in that file or the Space won't build. `sdk_version` is deliberately omitted so HF
-picks a version it supports rather than failing on the exact pin in
-`requirements.txt`. Secrets are set in the Space UI, not a `.env`. **Spaces' free tier
-offers Gradio, Docker (paid) and Static — not Streamlit**, which is why the UI is
-Gradio; the free tier's 2 vCPU / 16GB comfortably clears the ~770MB OCR peak.
+is the Space config (`sdk: streamlit`, `app_file: app.py`) — it must stay the first
+thing in that file or the Space won't build. `sdk_version` is deliberately omitted so
+HF picks a supported Streamlit rather than failing on the pinned `1.58.0`. Secrets are
+set in the Space UI, not a `.env`.
 
 **Render.** Defined by `render.yaml`
 (Blueprint). The start command binds to Render's injected `$PORT`; headless mode,
-the start command is just `python app.py`, which binds `0.0.0.0` and honours
-Render's injected `$PORT`. The three
+XSRF, and a 30MB `maxUploadSize` cap come from `.streamlit/config.toml`. The three
 `LLM_` env vars are `sync: false` in `render.yaml` and must be set in the Render
 dashboard. `requirements.txt` is pinned to exact versions for reproducible builds.
 The `starter` plan is specified deliberately — the free tier's 512MB RAM is not
@@ -93,21 +90,17 @@ and no authentication on the deployed app by design.
 ## Key implementation notes
 
 - **`.env` is read at import time and cached by `python-dotenv`.** `app.py` loads it
-  with `override=True`, but it runs once at import, so the process must be restarted
-  to pick up an edited `.env`. Without all three
+  with `override=True` so editing `.env` mid-session (e.g. switching `LLM_MODEL`)
+  takes effect on the next Streamlit rerun — but the app process itself must still be
+  restarted to pick up changes made *before* first launch. Without all three
   `LLM_` vars set, the app silently falls back to the offline heuristic
   (`llm_configured()` in `app.py` gates this).
 - **The live LLM API is never called in tests.** `tests/test_comparison.py` mocks the
   OpenAI client entirely (`MagicMock`) — `compare_clause` is unit-tested against
   canned JSON responses, including malformed ones to exercise the fail-safe path.
-- **Verdicts are cached in a per-session `gr.State` dict** keyed by `(template_text,
-  revised_text)`, so re-running a comparison doesn't re-call the LLM for pairs already
-  compared. It is deliberately per-session rather than module-level: a global cache
-  would serve one user's clause verdicts to another, which matters for contracts.
-- **`run_comparison` and the click handlers are generators.** They `yield` after each
-  clause so the morphing-blob animation and live percentage stream to the browser
-  while the LLM calls run; Gradio renders each yielded tuple as an output update.
-  Turning them into plain functions would freeze the UI until the whole run finished.
+- **Verdicts are cached in `st.session_state`** keyed by `(template_text,
+  revised_text)` so Streamlit reruns (e.g. from widget interaction) don't re-call the
+  LLM for clause pairs already compared.
 - **`conftest.py`** exists solely so pytest adds the project root to `sys.path`,
   making `from src...` imports resolve when running `pytest` from the repo root.
 - Sample data lives in `data/`: `sample_template.txt`/`sample_revised.txt` (an 8→7

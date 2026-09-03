@@ -1,20 +1,17 @@
-"""Gradio UI for the Legal Document Comparison Tool.
+"""Streamlit UI for the Legal Document Comparison Tool.
 
 Pipeline: upload -> parse/OCR -> segment -> align -> per-clause LLM verdict -> report.
-
-Gradio (rather than Streamlit) because Hugging Face Spaces' free tier offers Gradio
-but not Streamlit, and the OCR path needs more RAM than other free hosts allow.
-Everything under ``src/`` is UI-agnostic and is untouched by this module.
 """
 from __future__ import annotations
 
-import html
 import os
+import tempfile
 import time
 from pathlib import Path
-from typing import Iterator, List, Optional, Tuple
+from typing import List, Optional
 
-import gradio as gr
+import pandas as pd
+import streamlit as st
 from dotenv import load_dotenv
 
 from src.alignment import AlignedPair, align
@@ -29,8 +26,8 @@ from src.parsing import extract_text
 from src.schema import ClauseVerdict
 from src.segmentation import segment
 
-# override=True so editing .env (e.g. switching LLM_MODEL) takes effect on a
-# restart — without it, python-dotenv keeps the value first loaded this process.
+# override=True so editing .env (e.g. switching LLM_MODEL) takes effect on the
+# next rerun — without it, python-dotenv keeps the value first loaded this process.
 load_dotenv(override=True)
 
 DATA_DIR = Path(__file__).parent / "data"
@@ -58,80 +55,77 @@ SOURCE_LABEL = {
     "image": "image — OCR applied",
 }
 
-UPLOAD_TYPES = [
-    ".pdf", ".txt", ".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp",
-]
+UPLOAD_TYPES = ["pdf", "txt", "png", "jpg", "jpeg", "bmp", "tif", "tiff", "webp"]
 
-# Cost control: every aligned clause pair costs one LLM call, so an unbounded
-# upload fans out into unbounded spend. Enforced in _check_size, since Gradio has
-# no built-in per-file size cap.
-MAX_UPLOAD_MB = 30
+# ------------------------------------------------------------------ page style
+
+# Warm amber gradient wash: soft blurred colour concentrated at the top of the
+# page, fading to near-white further down so the report stays legible. Layered
+# radial gradients (rather than an image) keep it resolution-independent and add
+# nothing to page weight. Streamlit's own header/toolbar is made transparent so
+# the gradient runs edge to edge behind it.
+_PAGE_STYLE = """
+<style>
+.stApp{
+  background:
+    radial-gradient(58% 46% at 8% 10%,  rgba(245,168,38,.62) 0%, rgba(245,168,38,0) 60%),
+    radial-gradient(50% 40% at 92% 2%,  rgba(242,104,60,.40) 0%, rgba(242,104,60,0) 64%),
+    radial-gradient(95% 60% at 50% -10%,rgba(255,206,128,.66) 0%, rgba(255,206,128,0) 72%),
+    linear-gradient(180deg,#FFF6E8 0%,#FFFCF6 42%,#FFFDF9 100%);
+  background-attachment: fixed;
+}
+[data-testid="stHeader"]{background:transparent;}
+
+/* Status banners: keep the semantic colour as a left accent bar, but drop the
+   saturated full-width tint, which fights the warm wash. The tint sits on the
+   inner stAlertContainer, not on stAlert itself. */
+[data-testid="stAlertContainer"]{
+  background:rgba(255,255,255,.86) !important;
+  border-radius:10px;
+  border-left:4px solid #9aa7b8;
+  box-shadow:0 4px 16px rgba(190,120,50,.07);
+  color:#1F2328;
+}
+[data-testid="stAlertContainer"]:has([data-testid="stAlertContentSuccess"]){border-left-color:#3a7d44;}
+[data-testid="stAlertContainer"]:has([data-testid="stAlertContentInfo"]){border-left-color:#F2A03C;}
+[data-testid="stAlertContainer"]:has([data-testid="stAlertContentWarning"]){border-left-color:#E08A1E;}
+[data-testid="stAlertContainer"]:has([data-testid="stAlertContentError"]){border-left-color:#b00020;}
+
+/* Cards (uploaders, expanders, table) sit on white so they read as raised
+   surfaces against the wash, matching the reference layout. */
+[data-testid="stFileUploader"] section,
+[data-testid="stExpander"] details{
+  background:#fff;
+  border:1px solid rgba(226,168,100,.30);
+  border-radius:12px;
+  box-shadow:0 6px 22px rgba(190,120,50,.07);
+}
+[data-testid="stExpander"] details{overflow:hidden;}
+
+/* Metric row: the big coral numbers from the reference. */
+[data-testid="stMetricValue"]{color:#EF5A28;font-weight:800;}
+</style>
+"""
 
 
 def llm_configured() -> bool:
     return bool(os.environ.get("LLM_API_KEY") and os.environ.get("LLM_BASE_URL"))
 
 
-# ------------------------------------------------------------------ page style
-
-# Warm amber gradient wash: soft blurred colour concentrated at the top of the
-# page, fading to near-white further down so the report stays legible. Layered
-# radial gradients (rather than an image) keep it resolution-independent.
-_CSS = """
-.gradio-container, .gradio-container .main {
-  background:
-    radial-gradient(58% 46% at 8% 10%,  rgba(245,168,38,.62) 0%, rgba(245,168,38,0) 60%),
-    radial-gradient(50% 40% at 92% 2%,  rgba(242,104,60,.40) 0%, rgba(242,104,60,0) 64%),
-    radial-gradient(95% 60% at 50% -10%,rgba(255,206,128,.66) 0%, rgba(255,206,128,0) 72%),
-    linear-gradient(180deg,#FFF6E8 0%,#FFFCF6 42%,#FFFDF9 100%) !important;
-  background-attachment: fixed !important;
-}
-.ldc-title{font-size:2.1rem;font-weight:800;color:#1F2328;margin:.2rem 0 .1rem;}
-.ldc-note{border-radius:10px;background:rgba(255,255,255,.86);padding:.7rem .9rem;
-  box-shadow:0 4px 16px rgba(190,120,50,.07);color:#1F2328;margin:.4rem 0;}
-.ldc-note.ok{border-left:4px solid #3a7d44;}
-.ldc-note.warn{border-left:4px solid #E08A1E;}
-.ldc-note.err{border-left:4px solid #b00020;}
-.ldc-note.info{border-left:4px solid #F2A03C;}
-
-/* Metric row: the big coral numbers. */
-.ldc-metrics{display:flex;gap:1.4rem;flex-wrap:wrap;margin:.9rem 0 .3rem;}
-.ldc-metric{flex:1 1 150px;background:rgba(255,255,255,.86);border-radius:12px;
-  padding:.7rem .9rem;box-shadow:0 6px 22px rgba(190,120,50,.07);}
-.ldc-metric .lbl{font-size:.82rem;color:#6b7280;}
-.ldc-metric .val{font-size:2rem;font-weight:800;color:#EF5A28;line-height:1.15;}
-
-/* Risk summary table. */
-.ldc-table{width:100%;border-collapse:collapse;background:rgba(255,255,255,.9);
-  border-radius:12px;overflow:hidden;box-shadow:0 6px 22px rgba(190,120,50,.07);}
-.ldc-table th,.ldc-table td{text-align:left;padding:.5rem .8rem;font-size:.92rem;
-  border-bottom:1px solid rgba(226,168,100,.22);}
-.ldc-table th{color:#6b7280;font-weight:600;}
-
-/* Per-clause detail. */
-.ldc-clause{background:rgba(255,255,255,.92);border:1px solid rgba(226,168,100,.30);
-  border-radius:12px;margin:.55rem 0;overflow:hidden;
-  box-shadow:0 6px 22px rgba(190,120,50,.07);}
-.ldc-clause>summary{cursor:pointer;padding:.65rem .9rem;font-weight:600;color:#1F2328;}
-.ldc-body{padding:0 .9rem .9rem;}
-.ldc-expl{padding:.6rem .8rem;border-radius:6px;color:#1a1a1a;margin-bottom:.6rem;}
-.ldc-cols{display:flex;gap:1rem;flex-wrap:wrap;}
-.ldc-col{flex:1 1 260px;min-width:240px;}
-.ldc-col .cap{font-size:.78rem;color:#6b7280;margin-bottom:.2rem;}
-.ldc-col .txt{font-size:.9rem;white-space:pre-wrap;color:#1F2328;}
-"""
-
 # ------------------------------------------------------ processing animation
 
 # Abstract morphing shapes: three blobs that bend/expand/rotate and blend, plus a
-# slowly spinning dashed ring. multiply (not screen) so they read as deeper pools
-# of the warm background rather than washing out to white on a light page.
+# slowly spinning dashed ring. Rendered ONCE into its own placeholder so the CSS
+# animation runs continuously; only the percentage text below it is re-rendered.
 _PROCESSING_SHAPES = """
 <style>
 .ldc-stage{display:flex;justify-content:center;align-items:center;height:168px;margin:6px 0 2px;}
 .ldc-orbit{position:relative;width:148px;height:148px;}
 .ldc-ring{position:absolute;inset:-12px;border:2px dashed rgba(226,150,60,.45);
   border-radius:46% 54% 52% 48%/48% 46% 54% 52%;animation:ldc-spin 7s linear infinite;}
+/* multiply, not screen: screen blends toward WHITE, so on this light amber page
+   the blobs washed out to invisible. multiply darkens instead, so they read as
+   deeper pools of the background gradient's own colours. */
 .ldc-blob{position:absolute;inset:0;margin:auto;width:98px;height:98px;mix-blend-mode:multiply;
   opacity:.72;animation:ldc-morph 3.4s ease-in-out infinite;}
 .ldc-b1{background:#F5A826;}
@@ -158,73 +152,66 @@ _PROCESSING_SHAPES = """
 """
 
 
-# Gradio follows the OS dark-mode preference, but this app's palette is light-only
-# (a warm amber wash with dark text), so dark mode renders near-black uploaders and
-# unreadable text over it. Gradio's supported switch is the ?__theme=light URL
-# param; pinning it from <head> runs before the app boots, so there is no flash.
-_FORCE_LIGHT = """
-<script>
-  (function () {
-    var url = new URL(window.location.href);
-    if (url.searchParams.get('__theme') !== 'light') {
-      url.searchParams.set('__theme', 'light');
-      window.location.replace(url.href);
-    }
-  })();
-</script>
-"""
-
-
-def _progress_html(frac: float, i: int, total: int) -> str:
+def _render_percent(placeholder, frac: float, i: int, total: int) -> None:
     pct = int(round(frac * 100))
-    return (
-        f"{_PROCESSING_SHAPES}"
+    placeholder.markdown(
         f"<div class='ldc-pct'>{pct}%</div>"
-        f"<div class='ldc-sub'>Comparing clauses… ({i}/{total})</div>"
+        f"<div class='ldc-sub'>Comparing clauses… ({i}/{total})</div>",
+        unsafe_allow_html=True,
     )
-
-
-def _note(kind: str, message: str) -> str:
-    return f"<div class='ldc-note {kind}'>{message}</div>"
 
 
 # --------------------------------------------------------------------------- IO
 
 
-def _check_size(path: str, label: str) -> Optional[str]:
-    """Return an error message if the file exceeds the upload cap, else None."""
-    mb = os.path.getsize(path) / (1024 * 1024)
-    if mb > MAX_UPLOAD_MB:
-        return f"{label} is {mb:.1f}MB, above the {MAX_UPLOAD_MB}MB limit."
-    return None
+def _read_upload(upload) -> tuple[str, str]:
+    """Persist an uploaded file to a temp path and run it through extract_text."""
+    suffix = Path(upload.name).suffix.lower()
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+        tmp.write(upload.getbuffer())
+        tmp_path = tmp.name
+    try:
+        text, source = extract_text(tmp_path)
+    finally:
+        os.unlink(tmp_path)
+    return text, source
 
 
-def _check_type(path: str, label: str) -> Optional[str]:
-    ext = os.path.splitext(path)[1].lower()
-    if ext not in UPLOAD_TYPES:
-        return f"{label} has unsupported type '{ext}'. Accepted: {', '.join(UPLOAD_TYPES)}."
-    return None
+def _load_sample() -> tuple[tuple[str, str], tuple[str, str]]:
+    t_text, t_src = extract_text(str(SAMPLE_TEMPLATE))
+    r_text, r_src = extract_text(str(SAMPLE_REVISED))
+    return (t_text, t_src), (r_text, r_src)
 
 
 # --------------------------------------------------------------- comparison run
 
 
+def _verdict_cache() -> dict:
+    if "verdict_cache" not in st.session_state:
+        st.session_state.verdict_cache = {}
+    return st.session_state.verdict_cache
+
+
 def run_comparison(
     pairs: List[AlignedPair],
     use_llm: bool,
-    cache: dict,
-) -> Iterator[Tuple[List[ClauseVerdict], str]]:
-    """Yield (verdicts_so_far, progress_html) after each clause.
+    anim_ph,
+    pct_ph,
+) -> List[ClauseVerdict]:
+    """Produce a verdict per pair, caching aligned-pair verdicts across reruns.
 
-    Streaming rather than returning once keeps the morphing-shapes animation and
-    the live percentage on screen while the LLM calls run.
+    Drives the morphing-shapes animation: ``anim_ph`` holds the shapes (rendered
+    once so the CSS keeps running) and ``pct_ph`` shows the live percentage.
     """
+    cache = _verdict_cache()
     client = get_client() if use_llm else None
     model = get_model() if use_llm else ""
 
     verdicts: List[ClauseVerdict] = []
     total = len(pairs)
-    yield verdicts, _progress_html(0.0, 0, total)
+
+    anim_ph.markdown(_PROCESSING_SHAPES, unsafe_allow_html=True)
+    _render_percent(pct_ph, 0.0, 0, total)
 
     for i, pair in enumerate(pairs, start=1):
         if pair.template is None or pair.revised is None:
@@ -243,196 +230,145 @@ def run_comparison(
                     time.sleep(0.35)
                 cache[key] = verdict
                 verdicts.append(verdict)
-        yield verdicts, _progress_html(i / total, i, total)
+        _render_percent(pct_ph, i / total, i, total)
+
+    anim_ph.empty()
+    pct_ph.empty()
+    return verdicts
 
 
 # ------------------------------------------------------------------- rendering
 
 
-def render_report(verdicts: List[ClauseVerdict]) -> str:
+def _risk_style(val: str) -> str:
+    color = RISK_COLORS.get(val, "#000000")
+    weight = "700" if val in ("high", "medium") else "400"
+    return f"color: {color}; font-weight: {weight};"
+
+
+def render_report(verdicts: List[ClauseVerdict]) -> None:
     high = sum(1 for v in verdicts if v.risk_level == "high")
     meaning = sum(1 for v in verdicts if v.change_type == "meaning_changed")
     added = sum(1 for v in verdicts if v.change_type == "added")
     deleted = sum(1 for v in verdicts if v.change_type == "deleted")
 
-    metrics = "".join(
-        f"<div class='ldc-metric'><div class='lbl'>{lbl}</div>"
-        f"<div class='val'>{val}</div></div>"
-        for lbl, val in (
-            ("High-risk changes", high),
-            ("Meaning changes", meaning),
-            ("Added clauses", added),
-            ("Deleted clauses", deleted),
-        )
-    )
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("High-risk changes", high)
+    c2.metric("Meaning changes", meaning)
+    c3.metric("Added clauses", added)
+    c4.metric("Deleted clauses", deleted)
 
+    st.subheader("Risk summary")
     ordered = sorted(
         verdicts,
         key=lambda v: (RISK_ORDER.get(v.risk_level, 0), v.change_type == "meaning_changed"),
         reverse=True,
     )
-
-    rows = ""
-    for v in ordered:
-        color = RISK_COLORS.get(v.risk_level, "#000000")
-        weight = "700" if v.risk_level in ("high", "medium") else "400"
-        rows += (
-            f"<tr><td>{html.escape(v.heading)}</td>"
-            f"<td>{html.escape(v.change_type)}</td>"
-            f"<td style='color:{color};font-weight:{weight};'>"
-            f"{html.escape(v.risk_level)}</td></tr>"
-        )
-    table = (
-        "<table class='ldc-table'><thead><tr><th>heading</th><th>change_type</th>"
-        f"<th>risk_level</th></tr></thead><tbody>{rows}</tbody></table>"
+    df = pd.DataFrame(
+        {
+            "heading": [v.heading for v in ordered],
+            "change_type": [v.change_type for v in ordered],
+            "risk_level": [v.risk_level for v in ordered],
+        }
     )
+    styled = df.style.map(_risk_style, subset=["risk_level"])
+    st.dataframe(styled, use_container_width=True, hide_index=True)
 
-    details = ""
+    st.subheader("Clause-by-clause detail")
     for v in ordered:
         tint = CHANGE_TINTS.get(v.change_type, "#f3f4f6")
         label = f"{v.heading} — {v.change_type} / {v.risk_level} risk"
-        open_attr = " open" if v.risk_level == "high" else ""
-        left = html.escape(v.template_text or "(not present in template)")
-        right = html.escape(v.revised_text or "(not present in revised)")
-        details += (
-            f"<details class='ldc-clause'{open_attr}>"
-            f"<summary>{html.escape(label)}</summary>"
-            f"<div class='ldc-body'>"
-            f"<div class='ldc-expl' style='background:{tint};'>"
-            f"<b>What changed:</b> {html.escape(v.explanation)}</div>"
-            f"<div class='ldc-cols'>"
-            f"<div class='ldc-col'><div class='cap'>Template</div>"
-            f"<div class='txt'>{left}</div></div>"
-            f"<div class='ldc-col'><div class='cap'>Revised</div>"
-            f"<div class='txt'>{right}</div></div>"
-            f"</div></div></details>"
-        )
-
-    return (
-        f"<div class='ldc-metrics'>{metrics}</div>"
-        f"<h3>Risk summary</h3>{table}"
-        f"<h3>Clause-by-clause detail</h3>{details}"
-    )
+        with st.expander(label, expanded=v.risk_level == "high"):
+            st.markdown(
+                f"<div style='background:{tint};color:#1a1a1a;padding:0.6rem 0.8rem;"
+                f"border-radius:6px;'>"
+                f"<b>What changed:</b> {v.explanation}</div>",
+                unsafe_allow_html=True,
+            )
+            left, right = st.columns(2)
+            with left:
+                st.caption("Template")
+                st.write(v.template_text or "_(not present in template)_")
+            with right:
+                st.caption("Revised")
+                st.write(v.revised_text or "_(not present in revised)_")
 
 
 # ------------------------------------------------------------------------ main
 
 
-def _compare(
-    template_path: Optional[str],
-    revised_path: Optional[str],
-    cache: dict,
-    use_sample: bool,
-) -> Iterator[Tuple[str, str, dict]]:
-    """Drive the whole pipeline, streaming (status_html, report_html, cache)."""
-    if use_sample:
-        template_path, revised_path = str(SAMPLE_TEMPLATE), str(SAMPLE_REVISED)
-    else:
-        if not template_path or not revised_path:
-            yield _note("err", "Upload both a template and a revised document, "
-                               "or load the sample."), "", cache
-            return
-        for path, label in ((template_path, "Template"), (revised_path, "Revised contract")):
-            problem = _check_type(path, label) or _check_size(path, label)
-            if problem:
-                yield _note("err", html.escape(problem)), "", cache
-                return
-
-    yield _note("info", "Reading documents…"), "", cache
-
-    try:
-        t_text, t_src = extract_text(template_path)
-        r_text, r_src = extract_text(revised_path)
-    except Exception as exc:  # noqa: BLE001 — surface parse/OCR failure in the UI
-        yield _note("err", f"Could not read the documents: {html.escape(str(exc))}"), "", cache
-        return
-
-    header = (
-        ("Loaded sample NDA.<br>" if use_sample else "")
-        + f"Template detected as <b>{SOURCE_LABEL[t_src]}</b>.<br>"
-        + f"Revised detected as <b>{SOURCE_LABEL[r_src]}</b>."
-    )
-
-    template_clauses = segment(t_text)
-    revised_clauses = segment(r_text)
-    header += (
-        f"<br>Segmented {len(template_clauses)} template clauses and "
+def _process(template_text: str, revised_text: str) -> None:
+    template_clauses = segment(template_text)
+    revised_clauses = segment(revised_text)
+    st.caption(
+        f"Segmented {len(template_clauses)} template clauses and "
         f"{len(revised_clauses)} revised clauses."
     )
     pairs = align(template_clauses, revised_clauses)
+    anim_ph = st.empty()
+    pct_ph = st.empty()
+    verdicts = run_comparison(pairs, llm_configured(), anim_ph, pct_ph)
+    render_report(verdicts)
 
-    if not pairs:
-        yield _note("err", "No clauses were detected in these documents."), "", cache
+
+def main() -> None:
+    st.set_page_config(page_title="Legal Document Comparison Tool", layout="wide")
+    st.markdown(_PAGE_STYLE, unsafe_allow_html=True)
+    st.title("⚖️ Legal Document Comparison Tool")
+
+    configured = llm_configured()
+    if configured:
+        st.success(f"LLM configured — model `{os.environ.get('LLM_MODEL', '?')}`.")
+    else:
+        st.warning(
+            "Set LLM_API_KEY, LLM_BASE_URL and LLM_MODEL in your .env to run "
+            "comparisons. You can still browse the UI with sample data loaded "
+            "(clauses are compared with an offline text-similarity heuristic)."
+        )
+
+    col_a, col_b = st.columns(2)
+    template_upload = col_a.file_uploader("Template (original)", type=UPLOAD_TYPES)
+    revised_upload = col_b.file_uploader("Revised contract", type=UPLOAD_TYPES)
+
+    # Centre the action buttons (width-independent), and keep them in a placeholder
+    # we can clear so they disappear the moment a comparison starts.
+    st.markdown(
+        "<style>"
+        "div[data-testid='stElementContainer']:has(>.stButton){width:100% !important;}"
+        ".stButton{display:flex;justify-content:center;width:100%;}"
+        ".stButton>button{min-width:260px;max-width:420px;}"
+        "</style>",
+        unsafe_allow_html=True,
+    )
+    controls_ph = st.empty()
+    with controls_ph.container():
+        run_clicked = st.button("Compare", type="primary")
+        sample_clicked = st.button("Load sample contracts")
+
+    if sample_clicked:
+        controls_ph.empty()
+        (t_text, t_src), (r_text, r_src) = _load_sample()
+        st.info(
+            f"Loaded sample NDA.  \n"
+            f"Template detected as **{SOURCE_LABEL[t_src]}**.  \n"
+            f"Revised detected as **{SOURCE_LABEL[r_src]}**."
+        )
+        _process(t_text, r_text)
         return
 
-    verdicts: List[ClauseVerdict] = []
-    for verdicts, progress in run_comparison(pairs, llm_configured(), cache):
-        yield _note("info", header) + progress, "", cache
-
-    yield _note("info", header), render_report(verdicts), cache
-
-
-def _on_compare(template_path, revised_path, cache):
-    yield from _compare(template_path, revised_path, cache, use_sample=False)
-
-
-def _on_sample(cache):
-    yield from _compare(None, None, cache, use_sample=True)
-
-
-def build_demo() -> gr.Blocks:
-    # NB: Gradio 6 moved `theme` and `css` off the Blocks constructor — they are
-    # passed to launch() below. Setting them here is silently ignored (warning only).
-    with gr.Blocks(title="Legal Document Comparison Tool") as demo:
-        gr.HTML("<div class='ldc-title'>⚖️ Legal Document Comparison Tool</div>")
-
-        if llm_configured():
-            gr.HTML(_note("ok", f"LLM configured — model "
-                                f"<code>{html.escape(os.environ.get('LLM_MODEL', '?'))}</code>."))
-        else:
-            gr.HTML(_note(
-                "warn",
-                "Set LLM_API_KEY, LLM_BASE_URL and LLM_MODEL to run comparisons. "
-                "You can still browse the UI with sample data loaded (clauses are "
-                "compared with an offline text-similarity heuristic).",
-            ))
-
-        with gr.Row():
-            template_in = gr.File(
-                label="Template (original)", file_types=UPLOAD_TYPES, type="filepath"
-            )
-            revised_in = gr.File(
-                label="Revised contract", file_types=UPLOAD_TYPES, type="filepath"
-            )
-
-        with gr.Row():
-            compare_btn = gr.Button("Compare", variant="primary")
-            sample_btn = gr.Button("Load sample contracts")
-
-        cache_state = gr.State({})
-        status_out = gr.HTML()
-        report_out = gr.HTML()
-
-        compare_btn.click(
-            _on_compare,
-            inputs=[template_in, revised_in, cache_state],
-            outputs=[status_out, report_out, cache_state],
+    if run_clicked:
+        if not template_upload or not revised_upload:
+            st.error("Please upload both a template and a revised document, or load the sample.")
+            return
+        controls_ph.empty()
+        t_text, t_src = _read_upload(template_upload)
+        r_text, r_src = _read_upload(revised_upload)
+        st.info(
+            f"Template detected as **{SOURCE_LABEL[t_src]}**.  \n"
+            f"Revised detected as **{SOURCE_LABEL[r_src]}**."
         )
-        sample_btn.click(
-            _on_sample,
-            inputs=[cache_state],
-            outputs=[status_out, report_out, cache_state],
-        )
-
-    return demo
+        _process(t_text, r_text)
 
 
 if __name__ == "__main__":
-    # Spaces serves on 7860; Render (and anything else injecting $PORT) overrides it.
-    build_demo().launch(
-        server_name="0.0.0.0",
-        server_port=int(os.environ.get("PORT", 7860)),
-        theme=gr.themes.Soft(primary_hue="orange", neutral_hue="stone"),
-        css=_CSS,
-        head=_FORCE_LIGHT,
-    )
+    main()
