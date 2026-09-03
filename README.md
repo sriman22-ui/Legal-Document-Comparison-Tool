@@ -6,6 +6,25 @@ just a text diff. For each clause the tool classifies the change by **meaning** 
 where the *meaning materially changed*. This is the distinction Microsoft Word's
 Compare cannot make.
 
+## ▶ Try it live
+
+**[Open the live app](https://legal-document-comparison-tool-6zs8d597dzmqwk2cu7cggx.streamlit.app/)**
+&nbsp;·&nbsp;
+[![Open in Streamlit](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://legal-document-comparison-tool-6zs8d597dzmqwk2cu7cggx.streamlit.app/)
+
+No setup or API key needed — click **Load sample contracts** to run the full pipeline
+on the bundled NDA, or upload your own pair of documents.
+
+A few things worth knowing before you upload anything:
+
+- **Don't upload confidential contracts.** Each clause pair is sent to a third-party
+  LLM provider for comparison. Use the sample, or documents you don't mind sharing.
+- The app runs on a **free tier with a shared daily token budget**. If it is used up,
+  clauses come back flagged *"flagged for manual review — the provider's rate or quota
+  limit was reached"* instead of a real verdict. That is the fail-safe working, not a
+  crash; try again the next day.
+- First load after a quiet period is slow — the free instance sleeps and has to wake up.
+
 ## What it does
 
 A six-stage pipeline:
